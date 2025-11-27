@@ -281,7 +281,7 @@ class HealthBenchEval(Eval):
         # If True, run the grader on reference completions used by physicians, and physician_completions_mode must be set.
         run_reference_completions: bool = False,
         n_threads: int = 120,
-        subset_name: Literal["hard", "consensus"] | None = None,
+        subset_name: Literal["hard", "consensus", "pediatric"] | None = None,
     ):
         if run_reference_completions:
             assert physician_completions_mode is not None, (
@@ -293,31 +293,34 @@ class HealthBenchEval(Eval):
                 "physician_completions_mode must have reference completions if run_reference_completions is True"
             )
 
-        if subset_name == "hard":
-            input_path = INPUT_PATH_HARD
-        elif subset_name == "consensus":
-            input_path = INPUT_PATH_CONSENSUS
-        elif subset_name is None:
-            input_path = INPUT_PATH
+        if subset_name == "pediatric":
+            # tmp: load pediatric dataset
+            from datasets import load_dataset
+
+            ds = load_dataset("bofenghuang/healthbench-pediatric", "pediatric", split="test")
+            examples = ds.to_list()
+
         else:
-            assert False, f"Invalid subset name: {subset_name}"
-
-        # Try blobfile first; fall back to urllib or local file on failure or 404
-        try:
-            with bf.BlobFile(input_path, "rb") as f:
-                examples = [json.loads(line) for line in f]
-        except Exception:
-            if input_path.startswith("http://") or input_path.startswith("https://"):
-                with urllib.request.urlopen(input_path) as f:
-                    examples = [json.loads(line.decode("utf-8")) for line in f]
+            if subset_name == "hard":
+                input_path = INPUT_PATH_HARD
+            elif subset_name == "consensus":
+                input_path = INPUT_PATH_CONSENSUS
+            elif subset_name is None:
+                input_path = INPUT_PATH
             else:
-                with open(input_path, "rb") as f:
-                    examples = [json.loads(line) for line in f]
+                assert False, f"Invalid subset name: {subset_name}"
 
-        # tmp: load pediatric dataset
-        # from datasets import load_dataset
-        # ds = load_dataset("bofenghuang/healthbench-pediatric", "pediatric", split="test")
-        # examples = ds.to_list()
+            # Try blobfile first; fall back to urllib or local file on failure or 404
+            try:
+                with bf.BlobFile(input_path, "rb") as f:
+                    examples = [json.loads(line) for line in f]
+            except Exception:
+                if input_path.startswith("http://") or input_path.startswith("https://"):
+                    with urllib.request.urlopen(input_path) as f:
+                        examples = [json.loads(line.decode("utf-8")) for line in f]
+                else:
+                    with open(input_path, "rb") as f:
+                        examples = [json.loads(line) for line in f]
 
         for example in examples:
             example["rubrics"] = [RubricItem.from_dict(d) for d in example["rubrics"]]

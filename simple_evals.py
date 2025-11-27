@@ -389,6 +389,14 @@ def main():
                     n_threads=args.n_threads or 1,
                     subset_name="consensus",
                 )
+            case "healthbench_pediatric":
+                return HealthBenchEval(
+                    grader_model=grading_sampler,
+                    num_examples=10 if debug_mode else num_examples,
+                    n_repeats=args.n_repeats or 1,
+                    n_threads=args.n_threads or 1,
+                    subset_name="pediatric",
+                )
             case "healthbench_meta":
                 return HealthBenchMetaEval(
                     grader_model=grading_sampler,
