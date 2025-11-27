@@ -3,7 +3,8 @@ import time
 from typing import Any
 
 import openai
-from openai import OpenAI
+from openai import AzureOpenAI
+# from openai import OpenAI
 
 from ..types import MessageList, SamplerBase, SamplerResponse
 
@@ -22,9 +23,17 @@ class ResponsesSampler(SamplerBase):
         reasoning_model: bool = False,
         reasoning_effort: str | None = None,
     ):
-        self.api_key_name = "OPENAI_API_KEY"
-        assert os.environ.get("OPENAI_API_KEY"), "Please set OPENAI_API_KEY"
-        self.client = OpenAI()
+        # self.api_key_name = "OPENAI_API_KEY"
+        # assert os.environ.get("OPENAI_API_KEY"), "Please set OPENAI_API_KEY"
+        # self.client = OpenAI()
+        self.api_key_name = "AZURE_OPENAI_API_KEY"
+        assert os.environ.get("AZURE_OPENAI_API_KEY"), "Please set AZURE_OPENAI_API_KEY"
+        assert os.environ.get("AZURE_OPENAI_ENDPOINT"), "Please set AZURE_OPENAI_ENDPOINT"
+        self.client = AzureOpenAI(
+            azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
+            api_key=os.environ.get("AZURE_OPENAI_API_KEY"),
+            api_version=os.environ.get("AZURE_OPENAI_API_VERSION"),
+        )
         self.model = model
         self.system_message = system_message
         self.temperature = temperature

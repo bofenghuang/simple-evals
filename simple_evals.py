@@ -2,19 +2,21 @@ import argparse
 import json
 import subprocess
 from datetime import datetime
+from dotenv import load_dotenv
+import os
 
 import pandas as pd
 
 from . import common
-from .browsecomp_eval import BrowseCompEval
-from .drop_eval import DropEval
-from .gpqa_eval import GPQAEval
+# from .browsecomp_eval import BrowseCompEval
+# from .drop_eval import DropEval
+# from .gpqa_eval import GPQAEval
 from .healthbench_eval import HealthBenchEval
 from .healthbench_meta_eval import HealthBenchMetaEval
-from .math_eval import MathEval
-from .mgsm_eval import MGSMEval
-from .mmlu_eval import MMLUEval
-from .humaneval_eval import HumanEval
+# from .math_eval import MathEval
+# from .mgsm_eval import MGSMEval
+# from .mmlu_eval import MMLUEval
+# from .humaneval_eval import HumanEval
 from .sampler.chat_completion_sampler import (
     OPENAI_SYSTEM_MESSAGE_API,
     OPENAI_SYSTEM_MESSAGE_CHATGPT,
@@ -23,8 +25,10 @@ from .sampler.chat_completion_sampler import (
 from .sampler.claude_sampler import ClaudeCompletionSampler, CLAUDE_SYSTEM_MESSAGE_LMSYS
 from .sampler.o_chat_completion_sampler import OChatCompletionSampler
 from .sampler.responses_sampler import ResponsesSampler
-from .simpleqa_eval import SimpleQAEval
+from .sampler.gemini_sampler import GeminiVertexSampler
+# from .simpleqa_eval import SimpleQAEval
 
+load_dotenv()
 
 def main():
     parser = argparse.ArgumentParser(
@@ -58,6 +62,12 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Run in debug mode")
     parser.add_argument(
         "--examples", type=int, help="Number of examples to use (overrides default)"
+    )
+    parser.add_argument(
+        "--pretty-name",
+        type=str,
+        default="healthbench",
+        help="Pretty name to use for the output file.",
     )
 
     args = parser.parse_args()
@@ -133,7 +143,8 @@ def main():
         ),
         # GPT-4.1 models
         "gpt-4.1": ChatCompletionSampler(
-            model="gpt-4.1-2025-04-14",
+            # model="gpt-4.1-2025-04-14",
+            model="gpt-4.1",
             system_message=OPENAI_SYSTEM_MESSAGE_API,
             max_tokens=2048,
         ),
@@ -233,6 +244,60 @@ def main():
         "claude-3-haiku-20240307": ClaudeCompletionSampler(
             model="claude-3-haiku-20240307",
         ),
+        # GPT-5 (reasoning, via OpenAI Responses API on Azure)
+        # "gpt-5_medium": ResponsesSampler(
+        #     model="gpt-5",
+        #     reasoning_model=True,
+        # ),
+        # "gpt-5_high": ResponsesSampler(
+        #     model="gpt-5",
+        #     reasoning_model=True,
+        #     reasoning_effort="high",
+        # ),
+        # "gpt-5_low": ResponsesSampler(
+        #     model="gpt-5",
+        #     reasoning_model=True,
+        #     reasoning_effort="low",
+        # ),
+        # "gpt-5_minimal": ResponsesSampler(
+        #     model="gpt-5",
+        #     reasoning_model=True,
+        #     reasoning_effort="minimal",
+        # ),
+        "gpt-5_medium": OChatCompletionSampler(
+            model="gpt-5",
+        ),
+        "gpt-5_high": OChatCompletionSampler(
+            model="gpt-5",
+            reasoning_effort="high",
+        ),
+        "gpt-5_low": OChatCompletionSampler(
+            model="gpt-5",
+            reasoning_effort="low",
+        ),
+        "gpt-5_minimal": OChatCompletionSampler(
+            model="gpt-5",
+            reasoning_effort="minimal",
+        ),
+        # Gemini models:
+        "gemini-2.5-flash": GeminiVertexSampler(
+            model="gemini-2.5-flash",
+            # system_message="You are a helpful assistant.",
+            # thinking_budget_tokens=1024,
+        ),
+        "gemini-2.5-pro": GeminiVertexSampler(
+            model="gemini-2.5-pro",
+            # system_message="You are a helpful assistant.",
+            # thinking_budget_tokens=1024,
+        ),
+        # Gemini 3 (via Google Gen AI SDK on Vertex backend)
+        "gemini-3-pro-preview_high": GeminiVertexSampler(
+            model="gemini-3-pro-preview",
+        ),
+        "gemini-3-pro-preview_low": GeminiVertexSampler(
+            model="gemini-3-pro-preview",
+            thinking_level="low",
+        ),
     }
 
     if args.list_models:
@@ -252,7 +317,8 @@ def main():
     print(f"Running with args {args}")
 
     grading_sampler = ChatCompletionSampler(
-        model="gpt-4.1-2025-04-14",
+        # model="gpt-4.1-2025-04-14",
+        model="gpt-4.1",
         system_message=OPENAI_SYSTEM_MESSAGE_API,
         max_tokens=2048,
     )
@@ -377,21 +443,42 @@ def main():
             file_stem = f"{eval_name}_{model_name}"
             # file stem should also include the year, month, day, and time in hours and minutes
             file_stem += f"_{date_str}"
-            report_filename = f"/tmp/{file_stem}{debug_suffix}.html"
+            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            # report_filename = f"/tmp/{file_stem}{debug_suffix}.html"
+            report_filename = f"{root_dir}/outputs/{args.pretty_name}/{file_stem}{debug_suffix}.html"
+            os.makedirs(os.path.dirname(report_filename), exist_ok=True)
             print(f"Writing report to {report_filename}")
             with open(report_filename, "w") as fh:
                 fh.write(common.make_report(result))
             assert result.metrics is not None
             metrics = result.metrics | {"score": result.score}
+            # Compute and include average sampler latency if available
+            avg_latency_seconds = None
+            try:
+                if result.metadata and isinstance(result.metadata, dict):
+                    example_metas = result.metadata.get("example_level_metadata", [])
+                    latencies = [
+                        m.get("latency_seconds")
+                        for m in example_metas
+                        if isinstance(m, dict) and m.get("latency_seconds") is not None
+                    ]
+                    if len(latencies) > 0:
+                        avg_latency_seconds = sum(latencies) / len(latencies)
+            except Exception:
+                pass
+            if avg_latency_seconds is not None:
+                metrics["avg_latency_seconds"] = avg_latency_seconds
             # Sort metrics by key
             metrics = dict(sorted(metrics.items()))
             print(metrics)
-            result_filename = f"/tmp/{file_stem}{debug_suffix}.json"
+            # result_filename = f"/tmp/{file_stem}{debug_suffix}.json"
+            result_filename = f"{root_dir}/outputs/{args.pretty_name}/{file_stem}{debug_suffix}.json"
             with open(result_filename, "w") as f:
                 f.write(json.dumps(metrics, indent=2))
             print(f"Writing results to {result_filename}")
 
-            full_result_filename = f"/tmp/{file_stem}{debug_suffix}_allresults.json"
+            # full_result_filename = f"/tmp/{file_stem}{debug_suffix}_allresults.json"
+            full_result_filename = f"{root_dir}/outputs/{args.pretty_name}/{file_stem}{debug_suffix}_allresults.json"
             with open(full_result_filename, "w") as f:
                 result_dict = {
                     "score": result.score,

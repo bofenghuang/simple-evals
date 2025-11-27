@@ -21,10 +21,14 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
+import os
+import urllib.request
+import time
 
 import blobfile as bf
 import numpy as np
 import pandas as pd
+from pydantic import BaseModel
 
 from . import common
 from .sampler.chat_completion_sampler import (
@@ -88,6 +92,10 @@ In other words, for criteria with negative points, a good response should be cla
 Return just the json object in markdown format. Do not include any other text in the response.
 """.strip()
 
+class GradeResult(BaseModel):  # type: ignore[misc]
+    explanation: str
+    criteria_met: bool
+
 HEALTHBENCH_HTML_JINJA = (
     common.HTML_JINJA.replace(
         "<p>Correct Answer: {{ correct_answer }}</p>\n",
@@ -104,7 +112,8 @@ def parse_json_to_dict(json_string: str) -> dict:
     try:
         return json.loads(json_cleaned)
     except json.JSONDecodeError as e:
-        print(f"JSON decoding failed: {e}")
+        # print(f"JSON decoding failed: {e}")
+        print(f"JSON decoding failed: {e}\n{json_cleaned}")
         return {}
 
 
@@ -292,8 +301,24 @@ class HealthBenchEval(Eval):
             input_path = INPUT_PATH
         else:
             assert False, f"Invalid subset name: {subset_name}"
-        with bf.BlobFile(input_path, "rb") as f:
-            examples = [json.loads(line) for line in f]
+
+        # Try blobfile first; fall back to urllib or local file on failure or 404
+        try:
+            with bf.BlobFile(input_path, "rb") as f:
+                examples = [json.loads(line) for line in f]
+        except Exception:
+            if input_path.startswith("http://") or input_path.startswith("https://"):
+                with urllib.request.urlopen(input_path) as f:
+                    examples = [json.loads(line.decode("utf-8")) for line in f]
+            else:
+                with open(input_path, "rb") as f:
+                    examples = [json.loads(line) for line in f]
+
+        # tmp: load pediatric dataset
+        # from datasets import load_dataset
+        # ds = load_dataset("bofenghuang/healthbench-pediatric", "pediatric", split="test")
+        # examples = ds.to_list()
+
         for example in examples:
             example["rubrics"] = [RubricItem.from_dict(d) for d in example["rubrics"]]
 
@@ -371,15 +396,18 @@ class HealthBenchEval(Eval):
                 "<<conversation>>", convo_str
             ).replace("<<rubric_item>>", str(rubric_item))
             messages: MessageList = [dict(content=grader_prompt, role="user")]
-            while True:
-                sampler_response = self.grader_model(messages)
-                grading_response = sampler_response.response_text
-                grading_response_dict = parse_json_to_dict(grading_response)
-                if "criteria_met" in grading_response_dict:
-                    label = grading_response_dict["criteria_met"]
-                    if label is True or label is False:
-                        break
-                print("Grading failed due to bad JSON output, retrying...")
+            # while True:
+            # sampler_response = self.grader_model(messages)
+            sampler_response = self.grader_model(messages, response_schema=GradeResult)
+            grading_response = sampler_response.response_text
+            grading_response_dict = parse_json_to_dict(grading_response)
+            if not grading_response_dict:
+                print(f"Failed to grade rubric item with response {grading_response}")
+                # if "criteria_met" in grading_response_dict:
+                #     label = grading_response_dict["criteria_met"]
+                #     if label is True or label is False:
+                #         break
+                # print("Grading failed due to bad JSON output, retrying...")
             return grading_response_dict
 
         grading_response_list = common.map_with_progress(
@@ -388,9 +416,24 @@ class HealthBenchEval(Eval):
             pbar=False,
         )
 
+        # remove any rubric items or grading responses that are None
+        filtered_pairs = [
+            (rubric_item, grading_response)
+            for rubric_item, grading_response in zip(rubric_items, grading_response_list, strict=True)
+            if grading_response
+        ]
+        if filtered_pairs:
+            rubric_items, grading_response_list = zip(*filtered_pairs)
+            rubric_items, grading_response_list = list(rubric_items), list(grading_response_list)
+        else:
+            rubric_items, grading_response_list = [], []
+
         # compute the overall score
         overall_score = calculate_score(rubric_items, grading_response_list)
-        assert overall_score is not None
+        # assert overall_score is not None
+        if overall_score is None:
+            # Return empty results so this sample is excluded from final aggregation
+            return {}, "", []
         metrics = {
             "overall_score": overall_score,
         }
@@ -451,14 +494,18 @@ class HealthBenchEval(Eval):
                 response_text = row["completion_to_trial"]
                 response_usage = None
                 actual_queried_prompt_messages = prompt_messages
+                sampler_latency_seconds = None
             else:
+                t0 = time.time()
                 sampler_response = sampler(prompt_messages)
+                t1 = time.time()
                 response_text = sampler_response.response_text
                 response_dict = sampler_response.response_metadata
                 actual_queried_prompt_messages = (
                     sampler_response.actual_queried_message_list
                 )
                 response_usage = response_dict.get("usage", None)
+                sampler_latency_seconds = t1 - t0
 
             metrics, readable_explanation_str, rubric_items_with_grades = (
                 self.grade_sample(
@@ -469,6 +516,10 @@ class HealthBenchEval(Eval):
                 )
             )
 
+            if not metrics or "overall_score" not in metrics:
+                # Skip this sample from aggregation if no overall score was computed
+                # score = metrics["overall_score"]
+                return None
             score = metrics["overall_score"]
 
             # Create HTML for each sample result
@@ -500,8 +551,9 @@ class HealthBenchEval(Eval):
                     "completion": [dict(content=response_text, role="assistant")],
                     "prompt_id": row["prompt_id"],
                     "completion_id": hashlib.sha256(
-                        (row["prompt_id"] + response_text).encode("utf-8")
+                        (row["prompt_id"] + (response_text if response_text is not None else "")).encode("utf-8")
                     ).hexdigest(),
+                    "latency_seconds": sampler_latency_seconds,
                 },
             )
 
@@ -511,6 +563,8 @@ class HealthBenchEval(Eval):
             num_threads=self.n_threads,
             pbar=True,
         )
+        # Filter out samples that returned None (i.e., had no overall_score)
+        results = [r for r in results if r is not None]
         final_metrics = _aggregate_get_clipped_mean(results)
         return final_metrics
 

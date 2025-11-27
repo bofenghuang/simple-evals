@@ -1,8 +1,10 @@
+import os
 import time
 from typing import Any
 
 import openai
-from openai import OpenAI
+from openai import AzureOpenAI
+# from openai import OpenAI
 
 from ..types import MessageList, SamplerBase, SamplerResponse
 
@@ -25,9 +27,15 @@ class ChatCompletionSampler(SamplerBase):
         temperature: float = 0.5,
         max_tokens: int = 1024,
     ):
-        self.api_key_name = "OPENAI_API_KEY"
-        self.client = OpenAI()
-        # using api_key=os.environ.get("OPENAI_API_KEY")  # please set your API_KEY
+        # self.api_key_name = "OPENAI_API_KEY"
+        # self.client = OpenAI()
+        # using api_key=os.environ.get("OPENAI_API_KEY")  # please set your OPENAI_API_KEY
+        self.api_key_name = "AZURE_OPENAI_API_KEY"
+        self.client = AzureOpenAI(
+            azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
+            api_key=os.environ.get("AZURE_OPENAI_API_KEY"),
+            api_version=os.environ.get("AZURE_OPENAI_API_VERSION"),
+        )
         self.model = model
         self.system_message = system_message
         self.temperature = temperature
@@ -55,7 +63,7 @@ class ChatCompletionSampler(SamplerBase):
     def _pack_message(self, role: str, content: Any):
         return {"role": str(role), "content": content}
 
-    def __call__(self, message_list: MessageList) -> SamplerResponse:
+    def __call__(self, message_list: MessageList, response_schema: object | None = None) -> SamplerResponse:
         if self.system_message:
             message_list = [
                 self._pack_message("system", self.system_message)
@@ -63,13 +71,26 @@ class ChatCompletionSampler(SamplerBase):
         trial = 0
         while True:
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=message_list,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                )
-                content = response.choices[0].message.content
+                # Prefer Pydantic structured output when model is provided
+                if response_schema is not None:
+                    response = self.client.chat.completions.parse(
+                        model=self.model,
+                        messages=message_list,
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                        response_format=response_schema,
+                    )
+                    msg = response.choices[0].message
+                    parsed = msg.parsed  # a Pydantic model instance
+                    content = parsed.model_dump_json()  # JSON string of the structured output
+                else:
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=message_list,
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                    )
+                    content = response.choices[0].message.content
                 if content is None:
                     raise ValueError("OpenAI API returned empty response; retrying")
                 return SamplerResponse(
