@@ -26,6 +26,7 @@ import urllib.request
 import time
 
 import blobfile as bf
+from datasets import load_dataset
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel
@@ -281,7 +282,7 @@ class HealthBenchEval(Eval):
         # If True, run the grader on reference completions used by physicians, and physician_completions_mode must be set.
         run_reference_completions: bool = False,
         n_threads: int = 120,
-        subset_name: Literal["hard", "consensus", "pediatric"] | None = None,
+        subset_name: Literal["hard", "consensus", "pediatric", "consensus_pediatric"] | None = None,
     ):
         if run_reference_completions:
             assert physician_completions_mode is not None, (
@@ -295,9 +296,12 @@ class HealthBenchEval(Eval):
 
         if subset_name == "pediatric":
             # tmp: load pediatric dataset
-            from datasets import load_dataset
-
             ds = load_dataset("bofenghuang/healthbench-pediatric", "pediatric", split="test")
+            examples = ds.to_list()
+
+        elif subset_name == "consensus_pediatric":
+            # tmp: load consensus_pediatric dataset
+            ds = load_dataset("bofenghuang/healthbench-consensus-pediatric", "pediatric", split="test")
             examples = ds.to_list()
 
         else:

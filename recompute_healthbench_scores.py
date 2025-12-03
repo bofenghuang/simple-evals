@@ -17,6 +17,10 @@ GLOBAL_MAX_POINT: float | None = None
 GLOBAL_MIN_POINT_RAW: float | None = None
 GLOBAL_MAX_POINT_RAW: float | None = None
 
+# Global frequency counters for rubric points (raw and normalized)
+GLOBAL_POINT_COUNTS: dict[float, int] = {}
+GLOBAL_POINT_COUNTS_RAW: dict[float, int] = {}
+
 def _update_global_point_extremes(values: list[float]) -> None:
     global GLOBAL_MIN_POINT, GLOBAL_MAX_POINT
     for v in values:
@@ -32,6 +36,33 @@ def _update_global_point_extremes_raw(values: list[float]) -> None:
             GLOBAL_MIN_POINT_RAW = float(v)
         if GLOBAL_MAX_POINT_RAW is None or v > GLOBAL_MAX_POINT_RAW:
             GLOBAL_MAX_POINT_RAW = float(v)
+
+def _update_global_point_counts(values: list[float]) -> None:
+    """
+    Update global counts for normalized rubric points observed.
+    """
+    global GLOBAL_POINT_COUNTS
+    for v in values:
+        fv = float(v)
+        GLOBAL_POINT_COUNTS[fv] = GLOBAL_POINT_COUNTS.get(fv, 0) + 1
+
+def _update_global_point_counts_raw(values: list[float]) -> None:
+    """
+    Update global counts for raw rubric points observed (before normalization).
+    """
+    global GLOBAL_POINT_COUNTS_RAW
+    for v in values:
+        fv = float(v)
+        GLOBAL_POINT_COUNTS_RAW[fv] = GLOBAL_POINT_COUNTS_RAW.get(fv, 0) + 1
+
+def _format_sorted_counts(d: dict[float, int]) -> str:
+    """
+    Return a compact, sorted 'value:count' comma-separated string for counts.
+    """
+    if not d:
+        return "NA"
+    items = sorted(d.items(), key=lambda kv: kv[0])
+    return ", ".join(f"{k:g}:{v}" for k, v in items)
 
 
 def _get_subset_prompt_ids(subset_name: str) -> set[str]:
@@ -110,7 +141,9 @@ def calculate_score_from_rubric_items(
     """
     raw_points = [float(item["points"]) for item in rubric_items]
     _update_global_point_extremes_raw(raw_points)
+    _update_global_point_counts_raw(raw_points)
     normalized_points = _normalize_points_list(raw_points, norm)
+    _update_global_point_counts(normalized_points)
     total_possible_points = sum(p for p in normalized_points if p > 0)
     if total_possible_points == 0:
         return None
@@ -296,7 +329,8 @@ def main():
     for stats in summaries:
         fname = stats.get("file", "")
         pretty_name = Path(fname).stem.replace("_allresults", "")
-        pretty_name = re.sub(r"^healthbench_", "", pretty_name)
+        # pretty_name = re.sub(r"^healthbench_", "", pretty_name)
+        pretty_name = re.sub(rf"^{re.escape(args.inputs[0].split('/')[-1])}_", "", pretty_name)
         pretty_name = re.sub(r"_(\d+)_(\d+)$", "", pretty_name)
 
         rows.append(
@@ -330,6 +364,15 @@ def main():
         f"Global normalized rubric point range: "
         f"min={GLOBAL_MIN_POINT if GLOBAL_MIN_POINT is not None else 'NA'}, "
         f"max={GLOBAL_MAX_POINT if GLOBAL_MAX_POINT is not None else 'NA'}"
+    )
+    # Print global counts (raw and normalized)
+    print(
+        "Global raw rubric point counts (value:count): "
+        f"{_format_sorted_counts(GLOBAL_POINT_COUNTS_RAW)}"
+    )
+    print(
+        "Global normalized rubric point counts (value:count): "
+        f"{_format_sorted_counts(GLOBAL_POINT_COUNTS)}"
     )
 
 

@@ -1,22 +1,19 @@
 import argparse
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 import urllib.request
 import pandas as pd
 import re
 
 from .healthbench_eval import _compute_clipped_stats, INPUT_PATH_HARD, INPUT_PATH_CONSENSUS
 
-def _get_subset_prompt_ids(
-    subset_name: Literal["hard", "consensus"]
-) -> set[str]:
+
+def _get_subset_prompt_ids(subset_name: Literal["hard", "consensus"]) -> set[str]:
     """
     Fetch prompt_ids for a given HealthBench subset from the public JSONL.
     """
-    input_path = (
-        INPUT_PATH_HARD if subset_name == "hard" else INPUT_PATH_CONSENSUS
-    )
+    input_path = INPUT_PATH_HARD if subset_name == "hard" else INPUT_PATH_CONSENSUS
     ids: set[str] = set()
     with urllib.request.urlopen(input_path) as f:
         for raw_line in f:
@@ -37,7 +34,7 @@ def _get_subset_prompt_ids(
 
 def compute_subset_score_from_allresults(
     results_dir: str,
-    subset_name: Literal["hard", "consensus"] = "hard",
+    subset_name: Optional[Literal["hard", "consensus"]] = None,
 ) -> dict[str, dict[str, float]]:
     """
     Read all *_allresults.json files under results_dir, extract per-sample scores
@@ -50,7 +47,7 @@ def compute_subset_score_from_allresults(
     if not base.exists():
         raise FileNotFoundError(f"Directory not found: {results_dir}")
 
-    subset_ids = _get_subset_prompt_ids(subset_name)
+    subset_ids = None if subset_name is None else _get_subset_prompt_ids(subset_name)
     output: dict[str, dict[str, float]] = {}
 
     for p in sorted(base.glob("*_allresults.json")):
@@ -66,14 +63,14 @@ def compute_subset_score_from_allresults(
             em.get("score")
             for em in example_meta
             if isinstance(em, dict)
-            and em.get("prompt_id") in subset_ids
+            and (subset_ids is None or em.get("prompt_id") in subset_ids)
             and em.get("score") is not None
         ]
         latencies = [
             em.get("latency_seconds")
             for em in example_meta
             if isinstance(em, dict)
-            and em.get("prompt_id") in subset_ids
+            and (subset_ids is None or em.get("prompt_id") in subset_ids)
             and isinstance(em.get("latency_seconds"), (int, float))
         ]
         if len(scores) == 0:
@@ -99,7 +96,7 @@ def compute_subset_score_from_allresults(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Aggregate HealthBench hard/consensus subset scores from *_allresults.json"
+        description="Aggregate HealthBench scores from *_allresults.json (optionally filter to hard/consensus subset)"
     )
     parser.add_argument(
         "--results-dir",
@@ -111,8 +108,8 @@ def main():
         "--subset",
         type=str,
         choices=["hard", "consensus"],
-        default="hard",
-        help="Subset to aggregate over",
+        default=None,
+        help="Subset to aggregate over; default: no filter",
     )
     parser.add_argument(
         "--output-json",
@@ -122,9 +119,7 @@ def main():
     )
     args = parser.parse_args()
 
-    results = compute_subset_score_from_allresults(
-        results_dir=args.results_dir, subset_name=args.subset
-    )
+    results = compute_subset_score_from_allresults(results_dir=args.results_dir, subset_name=args.subset)
     if len(results) == 0:
         print("No aggregated results found.")
         return
@@ -132,7 +127,10 @@ def main():
     rows = []
     for fname, stats in results.items():
         pretty_name = Path(fname).stem.replace("_allresults", "")
-        pretty_name = re.sub(r"^healthbench_", "", pretty_name)
+        # If a subset filter is specified, also drop that subset prefix if present
+        # pretty_name = re.sub(r"^healthbench_", "", pretty_name)
+        pretty_name = re.sub(rf"^{re.escape(args.results_dir.split('/')[-1])}_", "", pretty_name)
+        # remove date
         pretty_name = re.sub(r"_(\d+)_(\d+)$", "", pretty_name)
 
         rows.append(
@@ -161,5 +159,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
