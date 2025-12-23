@@ -1,8 +1,10 @@
+import os
 import time
 from typing import Any
 
 import openai
-from openai import OpenAI
+from openai import AzureOpenAI
+# from openai import OpenAI
 
 from ..types import MessageList, SamplerBase, SamplerResponse
 
@@ -18,9 +20,15 @@ class OChatCompletionSampler(SamplerBase):
         reasoning_effort: str | None = None,
         model: str = "o1-mini",
     ):
-        self.api_key_name = "OPENAI_API_KEY"
-        self.client = OpenAI()
-        # using api_key=os.environ.get("OPENAI_API_KEY")  # please set your API_KEY
+        # self.api_key_name = "OPENAI_API_KEY"
+        # self.client = OpenAI()
+        # using api_key=os.environ.get("OPENAI_API_KEY")  # please set your OPENAI_API_KEY
+        self.api_key_name = "AZURE_OPENAI_API_KEY"
+        self.client = AzureOpenAI(
+            azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
+            api_key=os.environ.get("AZURE_OPENAI_API_KEY"),
+            api_version=os.environ.get("AZURE_OPENAI_API_VERSION"),
+        )
         self.model = model
         self.image_format = "url"
         self.reasoning_effort = reasoning_effort
