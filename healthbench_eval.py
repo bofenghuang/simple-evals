@@ -165,6 +165,8 @@ def calculate_score(
 
 
 def get_usage_dict(response_usage) -> dict[str, int | None]:
+    """Extract usage information, handling all API formats safely."""
+
     if response_usage is None:
         return {
             "input_tokens": None,
@@ -175,28 +177,58 @@ def get_usage_dict(response_usage) -> dict[str, int | None]:
         }
 
     try:
+        # Get input tokens (try both formats)
+        input_tokens = getattr(response_usage, 'input_tokens', None) or \
+                       getattr(response_usage, 'prompt_tokens', None)
+
+        # Get output tokens (try both formats)
+        output_tokens = getattr(response_usage, 'output_tokens', None) or \
+                        getattr(response_usage, 'completion_tokens', None)
+
+        # Get total tokens
+        total_tokens = getattr(response_usage, 'total_tokens', None)
+
+        # Get cached tokens safely
+        input_cached_tokens = None
+        input_details = getattr(response_usage, 'input_tokens_details', None) or \
+                        getattr(response_usage, 'prompt_tokens_details', None)
+
+        if input_details is not None:
+            if hasattr(input_details, 'cached_tokens'):
+                input_cached_tokens = input_details.cached_tokens
+            elif isinstance(input_details, dict):
+                input_cached_tokens = input_details.get('cached_tokens')
+
+        # Get reasoning tokens safely
+        output_reasoning_tokens = None
+        output_details = getattr(response_usage, 'output_tokens_details', None) or \
+                         getattr(response_usage, 'completion_tokens_details', None)
+
+        if output_details is not None:
+            if hasattr(output_details, 'reasoning_tokens'):
+                output_reasoning_tokens = output_details.reasoning_tokens
+            elif isinstance(output_details, dict):
+                output_reasoning_tokens = output_details.get('reasoning_tokens')
+
         return {
-            "input_tokens": response_usage.input_tokens,
-            "input_cached_tokens": response_usage.input_tokens_details.cached_tokens
-            if hasattr(response_usage.input_tokens_details, "cached_tokens")
-            else response_usage.input_tokens_details["cached_tokens"],
-            "output_tokens": response_usage.output_tokens,
-            "output_reasoning_tokens": response_usage.output_tokens_details.reasoning_tokens
-            if hasattr(response_usage.output_tokens_details, "reasoning_tokens")
-            else response_usage.output_tokens_details["reasoning_tokens"],
-            "total_tokens": response_usage.total_tokens,
+            "input_tokens": input_tokens,
+            "input_cached_tokens": input_cached_tokens,
+            "output_tokens": output_tokens,
+            "output_reasoning_tokens": output_reasoning_tokens,
+            "total_tokens": total_tokens,
         }
-    except AttributeError:
+
+    except Exception as e:
+        # If anything fails, return basic info only
+        print(f"Warning: Error parsing usage info: {e}, returning partial data")
         return {
-            "input_tokens": response_usage.prompt_tokens,
-            "input_cached_tokens": response_usage.prompt_tokens_details.cached_tokens
-            if hasattr(response_usage.prompt_tokens_details, "cached_tokens")
-            else response_usage.prompt_tokens_details["cached_tokens"],
-            "output_tokens": response_usage.completion_tokens,
-            "output_reasoning_tokens": response_usage.completion_tokens_details.reasoning_tokens
-            if hasattr(response_usage.completion_tokens_details, "reasoning_tokens")
-            else response_usage.completion_tokens_details["reasoning_tokens"],
-            "total_tokens": response_usage.total_tokens,
+            "input_tokens": getattr(response_usage, 'prompt_tokens',
+                                    getattr(response_usage, 'input_tokens', None)),
+            "input_cached_tokens": None,
+            "output_tokens": getattr(response_usage, 'completion_tokens',
+                                     getattr(response_usage, 'output_tokens', None)),
+            "output_reasoning_tokens": None,
+            "total_tokens": getattr(response_usage, 'total_tokens', None),
         }
 
 
@@ -283,6 +315,7 @@ class HealthBenchEval(Eval):
         run_reference_completions: bool = False,
         n_threads: int = 120,
         subset_name: Literal["hard", "consensus", "pediatric", "consensus_pediatric"] | None = None,
+        custom_data_path: str | None = None,
     ):
         if run_reference_completions:
             assert physician_completions_mode is not None, (
@@ -305,7 +338,10 @@ class HealthBenchEval(Eval):
             examples = ds.to_list()
 
         else:
-            if subset_name == "hard":
+            if subset_name == "custom":
+                assert custom_data_path is not None, "Must provide custom_data_path when subset_name='custom'"
+                input_path = custom_data_path
+            elif subset_name == "hard":
                 input_path = INPUT_PATH_HARD
             elif subset_name == "consensus":
                 input_path = INPUT_PATH_CONSENSUS

@@ -4,7 +4,7 @@ from typing import Any
 
 import openai
 from openai import AzureOpenAI
-# from openai import OpenAI
+from openai import OpenAI
 
 from ..types import MessageList, SamplerBase, SamplerResponse
 
@@ -26,6 +26,8 @@ class ChatCompletionSampler(SamplerBase):
         system_message: str | None = None,
         temperature: float = 0.5,
         max_tokens: int = 1024,
+        use_gateway: bool = False,
+        gateway_base_url: str = "https://genai-gateway-shared-nl-gcp.doctolib.ai",
     ):
         # self.api_key_name = "OPENAI_API_KEY"
         # self.client = OpenAI()
@@ -41,6 +43,27 @@ class ChatCompletionSampler(SamplerBase):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.image_format = "url"
+        self.use_gateway = use_gateway
+
+        if use_gateway:
+            # Use GenAI Gateway
+            self.api_key_name = "GATEWAY_API_KEY"
+            gateway_api_key = os.environ.get("GATEWAY_API_KEY")
+            if not gateway_api_key:
+                raise ValueError("GATEWAY_API_KEY environment variable must be set when use_gateway=True")
+
+            self.client = OpenAI(
+                api_key=gateway_api_key,
+                base_url=gateway_base_url
+            )
+        else:
+            # Use Azure OpenAI
+            self.api_key_name = "AZURE_OPENAI_API_KEY"
+            self.client = AzureOpenAI(
+                azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
+                api_key=os.environ.get("AZURE_OPENAI_API_KEY"),
+                api_version=os.environ.get("AZURE_OPENAI_API_VERSION"),
+            )
 
     def _handle_image(
         self,
