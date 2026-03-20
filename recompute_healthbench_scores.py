@@ -1,11 +1,19 @@
 import argparse
 import json
+import re
+import urllib.request
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
-import re
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import urllib.request
+import seaborn as sns
+
+from .utils.stats import bootstrap_ci, compute_agreement, compute_separability, compute_spearman
 
 # Public dataset endpoints (duplicated to avoid import-time package issues)
 INPUT_PATH_HARD = "https://openaipublic.blob.core.windows.net/simple-evals/healthbench/hard_2025-05-08-21-00-10.jsonl"
@@ -234,16 +242,22 @@ def recompute_for_file(
 
     # Compute aggregated recomputed stats per file
     recomputed_values = [r["recomputed_overall_score"] for r in results if r["recomputed_overall_score"] is not None]
+    original_values = [r["original_overall_score"] for r in results if r["original_overall_score"] is not None]
     n_samples = len(recomputed_values)
+
     if n_samples > 0:
         score_mean = float(np.clip(np.mean(recomputed_values), 0, 1))
-        # Bootstrap std over clipped means
-        bootstrap_samples = [np.random.choice(recomputed_values, n_samples) for _ in range(1000)]
-        bootstrap_means = [float(np.clip(np.mean(s), 0, 1)) for s in bootstrap_samples]
-        score_bootstrap_std = float(np.std(bootstrap_means))
+        ci = bootstrap_ci(recomputed_values)
     else:
         score_mean = None
-        score_bootstrap_std = None
+        ci = {"lower_bound": None, "upper_bound": None}
+
+    if original_values:
+        original_mean = float(np.clip(np.mean(original_values), 0, 1))
+        original_ci = bootstrap_ci(original_values)
+    else:
+        original_mean = None
+        original_ci = {"lower_bound": None, "upper_bound": None}
 
     latency_values = [r["latency_seconds"] for r in results if r.get("latency_seconds") is not None]
     avg_latency_seconds = float(np.mean(latency_values)) if latency_values else None
@@ -252,8 +266,12 @@ def recompute_for_file(
         {
             "score": score_mean,
             "score:n_samples": n_samples,
-            "score:bootstrap_std": score_bootstrap_std,
+            "ci_lower": ci["lower_bound"],
+            "ci_upper": ci["upper_bound"],
             "avg_latency_seconds": avg_latency_seconds,
+            "original_score": original_mean,
+            "original_ci_lower": original_ci["lower_bound"],
+            "original_ci_upper": original_ci["upper_bound"],
         }
     )
 
@@ -263,6 +281,151 @@ def recompute_for_file(
         json.dump(report, f, indent=2)
 
     return summary
+
+
+def _parse_model_name(file_path: Path, input_dir_name: str) -> str:
+    pretty_name = file_path.stem.replace("_allresults", "")
+    pretty_name = re.sub(rf"^{re.escape(input_dir_name)}_", "", pretty_name)
+    pretty_name = re.sub(r"_(\d+)_(\d+)$", "", pretty_name)
+    return pretty_name
+
+
+def compute_axis_model_stats(
+    all_files: list[Path],
+    input_dir_name: str,
+    norm: str = "none",
+    prompt_id_filter: set[str] | None = None,
+) -> dict[str, dict[str, dict[str, float]]]:
+    """Compute per-axis per-model stats.
+
+    Per-axis score = mean of binary criteria_met across rubric items tagged with that axis.
+    "overall" pseudo-axis uses the recomputed weighted overall score.
+
+    Returns: {axis_name: {model_name: {score, ci_lower, ci_upper}}}
+    """
+    # axis_name -> model_name -> list of per-rubric-item binary values
+    axis_values: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    # model_name -> list of per-example overall scores (for "overall")
+    full_values: dict[str, list[float]] = defaultdict(list)
+
+    for file_path in all_files:
+        model_name = _parse_model_name(file_path, input_dir_name)
+        with file_path.open("r") as f:
+            data = json.load(f)
+
+        examples = data.get("metadata", {}).get("example_level_metadata", [])
+        if prompt_id_filter is not None:
+            examples = [ex for ex in examples if ex.get("prompt_id") in prompt_id_filter]
+
+        for ex in examples:
+            rubric_items = ex.get("rubric_items", [])
+            # Per-axis: binary criteria_met
+            for ri in rubric_items:
+                val = 1.0 if ri.get("criteria_met") else 0.0
+                for tag in ri.get("tags", []):
+                    if tag.startswith("axis:"):
+                        axis_name = tag.replace("axis:", "")
+                        axis_values[axis_name][model_name].append(val)
+
+            # Full: recomputed overall score with norm
+            score = calculate_score_from_rubric_items(rubric_items, norm=norm)
+            if score is not None:
+                full_values[model_name].append(score)
+
+    # Compute bootstrap CI for each axis + full
+    result: dict[str, dict[str, dict[str, float]]] = {}
+
+    for axis_name, model_vals in sorted(axis_values.items()):
+        result[axis_name] = {}
+        for model_name, vals in model_vals.items():
+            ci = bootstrap_ci(vals)
+            result[axis_name][model_name] = {
+                "score": ci["mean"],
+                "ci_lower": ci["lower_bound"],
+                "ci_upper": ci["upper_bound"],
+            }
+
+    result["overall"] = {}
+    for model_name, vals in full_values.items():
+        ci = bootstrap_ci(vals)
+        result["overall"][model_name] = {
+            "score": ci["mean"],
+            "ci_lower": ci["lower_bound"],
+            "ci_upper": ci["upper_bound"],
+        }
+
+    return result
+
+
+def print_axis_analysis(
+    axis_model_stats: dict[str, dict[str, dict[str, float]]],
+    out_dir: Path | None = None,
+    norm: str = "none",
+):
+    """Print per-axis metrics table, pairwise agreement matrix, and save heatmap."""
+    axes = sorted(k for k in axis_model_stats if k != "overall")
+    all_axes = ["overall"] + axes
+
+    # --- Per-axis metrics table (vs overall) ---
+    print(f"\n=== Per-axis metrics vs overall (norm={norm}) ===")
+    rows = []
+    for axis in all_axes:
+        stats = axis_model_stats.get(axis, {})
+        sep = compute_separability(stats)
+        if axis == "overall":
+            rows.append({
+                "axis": axis,
+                "separability": f"{sep['separability']:.1%}",
+                "agreement_vs_overall": "-",
+                "spearman_vs_overall": "-",
+            })
+        else:
+            agr = compute_agreement(stats, axis_model_stats["overall"])
+            spr = compute_spearman(stats, axis_model_stats["overall"])
+            rows.append({
+                "axis": axis,
+                "separability": f"{sep['separability']:.1%}",
+                "agreement_vs_overall": f"{agr['agreement']:.2f}",
+                "spearman_vs_overall": f"{spr['correlation']:.2f}",
+            })
+    print(pd.DataFrame(rows).to_markdown(index=False))
+
+    # --- Pairwise agreement matrix ---
+    print(f"\n=== Pairwise agreement matrix ===")
+    n = len(all_axes)
+    agreement_matrix = np.ones((n, n))
+    for i, ax_a in enumerate(all_axes):
+        for j, ax_b in enumerate(all_axes):
+            if i == j:
+                continue
+            agr = compute_agreement(axis_model_stats[ax_a], axis_model_stats[ax_b])
+            agreement_matrix[i, j] = agr["agreement"]
+
+    df_matrix = pd.DataFrame(agreement_matrix, index=all_axes, columns=all_axes)
+    print(df_matrix.round(2).to_markdown())
+
+    # --- Heatmap ---
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.heatmap(
+        df_matrix,
+        annot=True,
+        fmt=".2f",
+        cmap="RdYlGn",
+        vmin=-1,
+        vmax=1,
+        center=0,
+        square=True,
+        linewidths=0.5,
+        ax=ax,
+    )
+    ax.set_title(f"Pairwise Agreement Between Axes (norm={norm})")
+    plt.tight_layout()
+
+    save_dir = out_dir or Path(".")
+    save_path = save_dir / f"axis_agreement_heatmap_{norm}.png"
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+    print(f"\nHeatmap saved to {save_path}")
 
 
 def main():
@@ -294,6 +457,11 @@ def main():
         default=None,
         help="Optional output directory for recomputed reports. Defaults to the source file directory.",
     )
+    parser.add_argument(
+        "--axis-analysis",
+        action="store_true",
+        help="Compute per-axis metrics (separability, agreement, spearman) and save agreement heatmap.",
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir) if args.out_dir is not None else None
@@ -324,32 +492,88 @@ def main():
             )
         )
 
-    # Pretty print aggregated recomputed scores in markdown (like aggregate_subset_scores)
+    # Build per-model stats keyed by pretty name
+    recomputed_model_stats: dict[str, dict] = {}
+    original_model_stats: dict[str, dict] = {}
     rows = []
     for stats in summaries:
         fname = stats.get("file", "")
         pretty_name = Path(fname).stem.replace("_allresults", "")
-        # pretty_name = re.sub(r"^healthbench_", "", pretty_name)
         pretty_name = re.sub(rf"^{re.escape(args.inputs[0].split('/')[-1])}_", "", pretty_name)
         pretty_name = re.sub(r"_(\d+)_(\d+)$", "", pretty_name)
 
+        recomputed_model_stats[pretty_name] = {
+            "score": stats.get("score"),
+            "ci_lower": stats.get("ci_lower"),
+            "ci_upper": stats.get("ci_upper"),
+        }
+        original_model_stats[pretty_name] = {
+            "score": stats.get("original_score"),
+            "ci_lower": stats.get("original_ci_lower"),
+            "ci_upper": stats.get("original_ci_upper"),
+        }
         rows.append(
             {
                 "model": pretty_name,
                 "score": stats.get("score"),
                 "n_samples": stats.get("score:n_samples"),
-                "std": stats.get("score:bootstrap_std"),
+                "ci_lower": stats.get("ci_lower"),
+                "ci_upper": stats.get("ci_upper"),
                 "latency_seconds": stats.get("avg_latency_seconds"),
             }
         )
+
     if rows:
+        print(f"\n=== Recomputed scores (norm={args.norm}) ===")
         df = pd.DataFrame(rows).sort_values(by="score", ascending=False)
-        df["score"] = df.apply(lambda r: f"{r['score']:.4f} +- {r['std']:.4f}" if r["score"] is not None and r["std"] is not None else "NA", axis=1)
-        df = df.drop(columns=["std"])
+        df["score"] = df.apply(
+            lambda r: f"{r['score']:.2f} [{r['ci_lower']:.2f}, {r['ci_upper']:.2f}]"
+            if r["score"] is not None and r["ci_lower"] is not None
+            else "NA",
+            axis=1,
+        )
+        df = df.drop(columns=["ci_lower", "ci_upper"])
         if "latency_seconds" in df.columns:
             df["latency_seconds"] = df["latency_seconds"].round(2)
         df = df[["model", "score", "latency_seconds", "n_samples"]]
         print(df.to_markdown(index=False))
+
+        # Separability for recomputed benchmark
+        sep = compute_separability(recomputed_model_stats)
+        print(
+            f"\nSeparability: {sep['separability']:.1%} "
+            f"({sep['n_separable']}/{sep['n_pairs']} model pairs confidently separated)"
+        )
+
+        # Agreement and Spearman vs original (only meaningful when norm != "none")
+        if args.norm != "none":
+            agreement = compute_agreement(recomputed_model_stats, original_model_stats)
+            spearman = compute_spearman(recomputed_model_stats, original_model_stats)
+
+            print(f"\n=== Comparison vs original (norm=none) ===")
+            print(
+                f"Agreement: {agreement['agreement']:.2f} "
+                f"({agreement['n_ref_separable']} reference-separable pairs)"
+            )
+            print(
+                f"Spearman:  {spearman['correlation']:.2f} "
+                f"(p={spearman['p_value']:.4e})"
+            )
+
+            # Also show original separability for reference
+            sep_orig = compute_separability(original_model_stats)
+            print(
+                f"Original separability: {sep_orig['separability']:.1%} "
+                f"({sep_orig['n_separable']}/{sep_orig['n_pairs']} pairs)"
+            )
+
+    # Per-axis analysis
+    if args.axis_analysis:
+        input_dir_name = args.inputs[0].split("/")[-1]
+        axis_stats = compute_axis_model_stats(
+            all_files, input_dir_name, norm=args.norm, prompt_id_filter=prompt_id_filter,
+        )
+        print_axis_analysis(axis_stats, out_dir=out_dir, norm=args.norm)
 
     # Print a concise multi-file summary to stdout
     # print(json.dumps({"summaries": summaries}, indent=4))
