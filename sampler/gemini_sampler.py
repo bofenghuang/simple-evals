@@ -2,6 +2,7 @@ import base64
 import os
 import time
 from typing import Any
+import json
 from google.genai import types
 
 from ..types import MessageList, SamplerBase, SamplerResponse
@@ -74,7 +75,7 @@ class GeminiVertexSampler(SamplerBase):
             contents.append({"role": "user" if role == "user" else "model", "parts": parts})
         return contents
 
-    def __call__(self, message_list: MessageList) -> SamplerResponse:
+    def __call__(self, message_list: MessageList, response_schema: object | None = None) -> SamplerResponse:
         # Collate system message
         system_text = self.system_message
         if system_text is None:
@@ -98,14 +99,15 @@ class GeminiVertexSampler(SamplerBase):
                 # from gemini-3, switch from thinking_budget to thinking_level
                 if self.thinking_level is not None:
                     config["thinking_config"] = types.ThinkingConfig(thinking_level=self.thinking_level)
-                # if output_schema:
-                #     config["response_mime_type"] = "application/json"
-                #     config["response_schema"] = output_schema
+                if response_schema is not None and hasattr(response_schema, "model_json_schema"):
+                    # Gemini structured outputs
+                    config["response_mime_type"] = "application/json"
+                    config["response_schema"] = response_schema.model_json_schema()
 
                 response = self._genai_client.models.generate_content(
                     model=self.model_name,
                     contents=contents,
-                    config=types.GenerateContentConfig(config) if config else None,
+                    config=types.GenerateContentConfig(**config) if config else None,
                 )
                 response_text = getattr(response, "text", None) or ""
 

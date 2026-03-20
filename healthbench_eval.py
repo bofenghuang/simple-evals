@@ -174,6 +174,17 @@ def get_usage_dict(response_usage) -> dict[str, int | None]:
             "total_tokens": None,
         }
 
+    if isinstance(response_usage, dict):
+        return {
+            "input_tokens": response_usage.get("input_tokens"),
+            "input_cached_tokens": response_usage.get("input_cached_tokens")
+            or response_usage.get("input_tokens_details", {}).get("cached_tokens"),
+            "output_tokens": response_usage.get("output_tokens"),
+            "output_reasoning_tokens": response_usage.get("output_reasoning_tokens")
+            or response_usage.get("output_tokens_details", {}).get("reasoning_tokens"),
+            "total_tokens": response_usage.get("total_tokens"),
+        }
+
     try:
         return {
             "input_tokens": response_usage.input_tokens,
@@ -283,6 +294,8 @@ class HealthBenchEval(Eval):
         run_reference_completions: bool = False,
         n_threads: int = 120,
         subset_name: Literal["hard", "consensus", "pediatric", "consensus_pediatric"] | None = None,
+        # If provided, reuse completions from a saved *_allresults.json instead of sampling.
+        replay_results_path: str | None = None,
     ):
         if run_reference_completions:
             assert physician_completions_mode is not None, (
@@ -333,6 +346,12 @@ class HealthBenchEval(Eval):
 
         # physician completions mode
         self.physician_completions_mode = physician_completions_mode
+        self.replay_results_path = replay_results_path
+        self.replay_mode = self.replay_results_path is not None
+        if self.replay_mode and self.physician_completions_mode is not None:
+            raise ValueError(
+                "replay_results_path cannot be used together with physician_completions_mode"
+            )
         if self.physician_completions_mode is not None:
             assert self.physician_completions_mode in PHYSICIAN_COMPLETION_MODES, (
                 f"Invalid physician completions mode: {self.physician_completions_mode}; must be one of {PHYSICIAN_COMPLETION_MODES.keys()}"
@@ -381,9 +400,77 @@ class HealthBenchEval(Eval):
                 num_examples,
             )
 
-        self.examples = examples * n_repeats
+        if self.replay_mode:
+            examples = self._prepare_replay_examples(examples, self.replay_results_path)
+
+        # tmp: filter examples by hard or pediatric
+        # from .aggregate_subset_scores import _get_subset_prompt_ids
+        # subset_ids = _get_subset_prompt_ids("hard")
+        # examples = [e for e in examples if e["prompt_id"] in subset_ids]
+
+        self.examples = examples if self.replay_mode else examples * n_repeats
         self.n_threads = n_threads
         self.grader_model = grader_model
+
+    def _prepare_replay_examples(
+        self,
+        examples: list[dict],
+        replay_results_path: str,
+    ) -> list[dict]:
+        with open(replay_results_path, "r") as f:
+            replay_data = json.load(f)
+
+        meta_list = replay_data.get("metadata", {}).get("example_level_metadata")
+        if not meta_list:
+            raise ValueError(
+                f"Replay file {replay_results_path} does not contain example_level_metadata"
+            )
+
+        prompt_id_to_example = {
+            example["prompt_id"]: example for example in examples
+        }
+        missing_prompt_ids = set()
+        skipped_without_completion = 0
+        replay_examples: list[dict] = []
+
+        for meta in meta_list:
+            prompt_id = meta.get("prompt_id")
+            if prompt_id not in prompt_id_to_example:
+                missing_prompt_ids.add(prompt_id)
+                continue
+
+            completion_messages = meta.get("completion") or []
+            if not completion_messages:
+                skipped_without_completion += 1
+                continue
+            completion_message = completion_messages[-1]
+            completion_text = completion_message.get("content")
+            if completion_text is None:
+                skipped_without_completion += 1
+                continue
+
+            base_example = copy.deepcopy(prompt_id_to_example[prompt_id])
+            base_example["completion_to_trial"] = completion_text
+            base_example["replay_prompt_messages"] = meta.get(
+                "prompt", base_example["prompt"]
+            )
+            base_example["_replay_usage"] = meta.get("usage")
+            base_example["_replay_latency_seconds"] = meta.get("latency_seconds")
+            replay_examples.append(base_example)
+
+        if not replay_examples:
+            raise ValueError(
+                f"No replayable examples found in {replay_results_path} after filtering"
+            )
+
+        if missing_prompt_ids:
+            print(
+                f"Replay file contains {len(missing_prompt_ids)} prompt_id values not present in the current dataset; skipping those entries."
+            )
+        if skipped_without_completion > 0:
+            print(f"Skipped {skipped_without_completion} replay entries without a completion.")
+        print(f"Loaded {len(replay_examples)} completions from {replay_results_path} for replay.")
+        return replay_examples
 
     def grade_sample(
         self,
@@ -427,7 +514,7 @@ class HealthBenchEval(Eval):
         filtered_pairs = [
             (rubric_item, grading_response)
             for rubric_item, grading_response in zip(rubric_items, grading_response_list, strict=True)
-            if grading_response
+            if grading_response and isinstance(grading_response, dict) and "criteria_met" in grading_response
         ]
         if filtered_pairs:
             rubric_items, grading_response_list = zip(*filtered_pairs)
@@ -502,6 +589,13 @@ class HealthBenchEval(Eval):
                 response_usage = None
                 actual_queried_prompt_messages = prompt_messages
                 sampler_latency_seconds = None
+            elif self.replay_mode:
+                response_text = row["completion_to_trial"]
+                actual_queried_prompt_messages = row.get(
+                    "replay_prompt_messages", prompt_messages
+                )
+                sampler_latency_seconds = row.get("_replay_latency_seconds")
+                response_usage = row.get("_replay_usage")
             else:
                 t0 = time.time()
                 sampler_response = sampler(prompt_messages)
@@ -513,6 +607,9 @@ class HealthBenchEval(Eval):
                 )
                 response_usage = response_dict.get("usage", None)
                 sampler_latency_seconds = t1 - t0
+
+            if response_text is None or (isinstance(response_text, str) and response_text.strip() == ""):
+                return None
 
             metrics, readable_explanation_str, rubric_items_with_grades = (
                 self.grade_sample(

@@ -23,6 +23,7 @@ from .sampler.chat_completion_sampler import (
     ChatCompletionSampler,
 )
 from .sampler.claude_sampler import ClaudeCompletionSampler, CLAUDE_SYSTEM_MESSAGE_LMSYS
+from .sampler.litellm_sampler import LiteLLMSampler
 from .sampler.o_chat_completion_sampler import OChatCompletionSampler
 from .sampler.responses_sampler import ResponsesSampler
 from .sampler.gemini_sampler import GeminiVertexSampler
@@ -68,6 +69,11 @@ def main():
         type=str,
         default="healthbench",
         help="Pretty name to use for the output file.",
+    )
+    parser.add_argument(
+        "--replay-results",
+        type=str,
+        help="Path to a saved *_allresults.json to replay without resampling.",
     )
 
     args = parser.parse_args()
@@ -145,8 +151,8 @@ def main():
         "gpt-4.1": ChatCompletionSampler(
             # model="gpt-4.1-2025-04-14",
             model="gpt-4.1",
-            system_message=OPENAI_SYSTEM_MESSAGE_API,
-            max_tokens=2048,
+            # system_message=OPENAI_SYSTEM_MESSAGE_API,
+            # max_tokens=2048,
         ),
         "gpt-4.1-temp-1": ChatCompletionSampler(
             model="gpt-4.1-2025-04-14",
@@ -167,18 +173,18 @@ def main():
         # GPT-4o models
         "gpt-4o": ChatCompletionSampler(
             model="gpt-4o",
-            system_message=OPENAI_SYSTEM_MESSAGE_API,
-            max_tokens=2048,
+            # system_message=OPENAI_SYSTEM_MESSAGE_API,
+            # max_tokens=2048,
         ),
         "gpt-4o-2024-11-20": ChatCompletionSampler(
             model="gpt-4o-2024-11-20",
-            system_message=OPENAI_SYSTEM_MESSAGE_API,
-            max_tokens=2048,
+            # system_message=OPENAI_SYSTEM_MESSAGE_API,
+            # max_tokens=2048,
         ),
         "gpt-4o-2024-08-06": ChatCompletionSampler(
             model="gpt-4o-2024-08-06",
-            system_message=OPENAI_SYSTEM_MESSAGE_API,
-            max_tokens=2048,
+            # system_message=OPENAI_SYSTEM_MESSAGE_API,
+            # max_tokens=2048,
         ),
         "gpt-4o-2024-08-06-temp-1": ChatCompletionSampler(
             model="gpt-4o-2024-08-06",
@@ -244,6 +250,22 @@ def main():
         "claude-3-haiku-20240307": ClaudeCompletionSampler(
             model="claude-3-haiku-20240307",
         ),
+        # Anthropic via LiteLLM
+        "claude-opus-4-5-20251101_medium": LiteLLMSampler(
+            model="anthropic/claude-opus-4-5-20251101",
+            # system_message=CLAUDE_SYSTEM_MESSAGE_LMSYS,
+            reasoning_effort="medium",
+        ),
+        "claude-sonnet-4-5-20250929": LiteLLMSampler(
+            model="anthropic/claude-sonnet-4-5-20250929",
+            # system_message=CLAUDE_SYSTEM_MESSAGE_LMSYS,
+            # reasoning_effort="low",
+        ),
+        "claude-haiku-4-5-20251001": LiteLLMSampler(
+            model="anthropic/claude-haiku-4-5-20251001",
+            # system_message=CLAUDE_SYSTEM_MESSAGE_LMSYS,
+            # reasoning_effort="medium",
+        ),
         # GPT-5 (reasoning, via OpenAI Responses API on Azure)
         # "gpt-5_medium": ResponsesSampler(
         #     model="gpt-5",
@@ -280,23 +302,46 @@ def main():
             reasoning_effort="minimal",
         ),
         # Gemini models:
-        "gemini-2.5-flash": GeminiVertexSampler(
-            model="gemini-2.5-flash",
-            # system_message="You are a helpful assistant.",
-            # thinking_budget_tokens=1024,
-        ),
-        "gemini-2.5-pro": GeminiVertexSampler(
+        "gemini-2.5-pro-dynamic": GeminiVertexSampler(
             model="gemini-2.5-pro",
             # system_message="You are a helpful assistant.",
             # thinking_budget_tokens=1024,
         ),
+        "gemini-2.5-flash-dynamic": GeminiVertexSampler(
+            model="gemini-2.5-flash",
+            # system_message="You are a helpful assistant.",
+            # thinking_budget_tokens=1024,
+        ),
+        "gemini-2.5-flash-lite": GeminiVertexSampler(
+            model="gemini-2.5-flash-lite",
+            # system_message="You are a helpful assistant.",
+            # thinking_budget_tokens=1024,
+            thinking_budget_tokens=-1,
+        ),
         # Gemini 3 (via Google Gen AI SDK on Vertex backend)
         "gemini-3-pro-preview_high": GeminiVertexSampler(
             model="gemini-3-pro-preview",
+            thinking_level="high",
         ),
         "gemini-3-pro-preview_low": GeminiVertexSampler(
             model="gemini-3-pro-preview",
             thinking_level="low",
+        ),
+        "gemini-3-flash-preview_high": GeminiVertexSampler(
+            model="gemini-3-flash-preview",
+            thinking_level="high",
+        ),
+        "gemini-3-flash-preview_medium": GeminiVertexSampler(
+            model="gemini-3-flash-preview",
+            thinking_level="medium",
+        ),
+        "gemini-3-flash-preview_low": GeminiVertexSampler(
+            model="gemini-3-flash-preview",
+            thinking_level="low",
+        ),
+        "gemini-3-flash-preview_minimal": GeminiVertexSampler(
+            model="gemini-3-flash-preview",
+            thinking_level="minimal",
         ),
     }
 
@@ -316,12 +361,24 @@ def main():
 
     print(f"Running with args {args}")
 
+    # tmp: grading sampler
     grading_sampler = ChatCompletionSampler(
         # model="gpt-4.1-2025-04-14",
         model="gpt-4.1",
         system_message=OPENAI_SYSTEM_MESSAGE_API,
         max_tokens=2048,
     )
+    # grading_sampler = OChatCompletionSampler(
+    #     model="gpt-5",
+    #     reasoning_effort="minimal",
+    # )
+    # grading_sampler = GeminiVertexSampler(
+    #     model="gemini-3-flash-preview",
+    #     thinking_level="minimal",
+    # )
+    # grading_sampler = LiteLLMSampler(
+    #     model="anthropic/claude-haiku-4-5-20251001",
+    # )
     equality_checker = ChatCompletionSampler(model="gpt-4-turbo-preview")
     # ^^^ used for fuzzy matching, just for math
 
@@ -372,6 +429,7 @@ def main():
                     n_repeats=args.n_repeats or 1,
                     n_threads=args.n_threads or 1,
                     subset_name=None,
+                    replay_results_path=args.replay_results,
                 )
             case "healthbench_hard":
                 return HealthBenchEval(
@@ -380,6 +438,7 @@ def main():
                     n_repeats=args.n_repeats or 1,
                     n_threads=args.n_threads or 1,
                     subset_name="hard",
+                    replay_results_path=args.replay_results,
                 )
             case "healthbench_consensus":
                 return HealthBenchEval(
@@ -388,6 +447,7 @@ def main():
                     n_repeats=args.n_repeats or 1,
                     n_threads=args.n_threads or 1,
                     subset_name="consensus",
+                    replay_results_path=args.replay_results,
                 )
             case "healthbench_pediatric":
                 return HealthBenchEval(
@@ -396,6 +456,7 @@ def main():
                     n_repeats=args.n_repeats or 1,
                     n_threads=args.n_threads or 1,
                     subset_name="pediatric",
+                    replay_results_path=args.replay_results,
                 )
             case "healthbench_consensus_pediatric":
                 return HealthBenchEval(
@@ -404,6 +465,7 @@ def main():
                     n_repeats=args.n_repeats or 1,
                     n_threads=args.n_threads or 1,
                     subset_name="consensus_pediatric",
+                    replay_results_path=args.replay_results,
                 )
             case "healthbench_meta":
                 return HealthBenchMetaEval(

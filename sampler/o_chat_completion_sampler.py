@@ -54,16 +54,25 @@ class OChatCompletionSampler(SamplerBase):
     def _pack_message(self, role: str, content: Any):
         return {"role": str(role), "content": content}
 
-    def __call__(self, message_list: MessageList) -> SamplerResponse:
+    def __call__(self, message_list: MessageList, response_schema: object | None = None) -> SamplerResponse:
         trial = 0
         while True:
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=message_list,
-                    reasoning_effort=self.reasoning_effort,
-                )
-                content = response.choices[0].message.content
+                if response_schema is not None:
+                    response = self.client.chat.completions.parse(
+                        model=self.model,
+                        messages=message_list,
+                        reasoning_effort=self.reasoning_effort,
+                        response_format=response_schema,
+                    )
+                    content = response.choices[0].message.parsed.model_dump_json()
+                else:
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=message_list,
+                        reasoning_effort=self.reasoning_effort,
+                    )
+                    content = response.choices[0].message.content
                 return SamplerResponse(
                     response_text=content,
                     response_metadata={"usage": response.usage},
